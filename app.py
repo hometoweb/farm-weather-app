@@ -1,84 +1,209 @@
-
 import streamlit as st
-import pandas as pd
 import requests
-from datetime import date, timedelta
+import plotly.graph_objects as go
+from datetime import datetime
 
-# --------- API FUNCTIONS --------- #
+# --- Constants ---
+LAT, LON = -31.985688, 24.802269
+WEATHERAPI_KEY = "95bd9405d0f24fd38b8125029251004"
+WEATHERBIT_KEY = "f7a96d163c3e4c949cd127bc08fbbb79"
+
+# --- API Requests ---
+def get_weatherapi():
+    url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LAT},{LON}&days=10"
+    res = requests.get(url)
+    data = res.json()
+    forecasts = []
+    for day in data["forecast"]["forecastday"]:
+        forecasts.append({
+            "date": day["date"],
+            "pop": float(day["day"].get("daily_chance_of_rain", 0)),
+            "temp": float(day["day"].get("avgtemp_c", 0)),
+            "wind": float(day["day"].get("maxwind_kph", 0)),
+            "humidity": float(day["day"].get("avghumidity", 0)),
+            "dew": float(day["hour"][12].get("dewpoint_c", 0)),
+            "solar": None,
+            "soil_moisture": None
+        })
+    return forecasts
 
 def get_weatherbit():
-    try:
-        api_key = st.secrets["f7a96d163c3e4c949cd127bc08fbbb79"]
-        url = f"https://api.weatherbit.io/v2.0/forecast/daily?lat=51.5074&lon=0.1278&days=7&key={api_key}"
-        res = requests.get(url)
-        data = res.json()
-        forecasts = [{
-            "source": "Weatherbit",
-            "date": pd.to_datetime(day["valid_date"]).date(),
-            "temp": day["temp"],
-            "precip": day["precip"]
-        } for day in data["data"]]
-        return pd.DataFrame(forecasts)
-    except Exception as e:
-        st.warning(f"Weatherbit API skipped: {e}")
-        return None
+    url = f"https://api.weatherbit.io/v2.0/forecast/daily?lat={LAT}&lon={LON}&key={WEATHERBIT_KEY}&days=10"
+    res = requests.get(url)
+    data = res.json()
+    forecasts = []
+    for day in data["data"]:
+        forecasts.append({
+            "date": day["valid_date"],
+            "pop": float(day.get("pop", 0)),
+            "temp": float(day.get("temp", 0)),
+            "wind": float(day.get("wind_spd", 0)) * 3.6,
+            "humidity": float(day.get("rh", 0)),
+            "dew": float(day.get("dewpt", 0)),
+            "solar": None,
+            "soil_moisture": None
+        })
+    return forecasts
 
-def get_open_meteo():
-    try:
-        url = "https://api.open-meteo.com/v1/forecast?latitude=51.5074&longitude=0.1278&daily=temperature_2m_max,precipitation_sum&timezone=Europe%2FLondon"
-        res = requests.get(url)
-        data = res.json()
-        forecasts = [{
-            "source": "Open-Meteo",
-            "date": pd.to_datetime(date_str).date(),
-            "temp": temp,
-            "precip": precip
-        } for date_str, temp, precip in zip(data["daily"]["time"], data["daily"]["temperature_2m_max"], data["daily"]["precipitation_sum"])]
-        return pd.DataFrame(forecasts)
-    except Exception as e:
-        st.warning(f"Open-Meteo API skipped: {e}")
-        return None
+def get_openmeteo():
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={LAT}&longitude={LON}"
+        f"&daily=precipitation_probability_mean,precipitation_sum,temperature_2m_max,windspeed_10m_max,dewpoint_2m_mean,"
+        f"relative_humidity_2m_mean,shortwave_radiation_sum,soil_moisture_0_to_1cm_mean"
+        f"&timezone=auto"
+    )
+    res = requests.get(url)
+    data = res.json()
 
-def get_visual_crossing():
-    try:
-        api_key = st.secrets["95bd9405d0f24fd38b8125029251004"]
-        url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/London/next7days?unitGroup=metric&key={api_key}&include=days"
-        res = requests.get(url)
-        data = res.json()
-        forecasts = [{
-            "source": "Visual Crossing",
-            "date": pd.to_datetime(day["datetime"]).date(),
-            "temp": day["temp"],
-            "precip": day["precip"]
-        } for day in data["days"]]
-        return pd.DataFrame(forecasts)
-    except Exception as e:
-        st.warning(f"Visual Crossing API skipped: {e}")
-        return None
+    # Check if 'daily' data exists in the response
+    if "daily" not in data:
+        # If not present, return an empty list or default values
+        st.warning("Open-Meteo API did not return daily data. Using fallback values.")
+        return []
 
-# --------- MAIN APP --------- #
+    daily = data["daily"]
+    keys = [
+        "time", "precipitation_probability_mean", "precipitation_sum", "temperature_2m_max",
+        "windspeed_10m_max", "dewpoint_2m_mean", "relative_humidity_2m_mean",
+        "shortwave_radiation_sum", "soil_moisture_0_to_1cm_mean"
+    ]
 
-st.title("Farm Weather Forecast (7-Day View)")
+    # Initialize fallback values for missing data
+    default_value = {
+        "pop": 0,  # No rain
+        "rain": 0,  # No rain (mm)
+        "temp": 20,  # Default temperature in °C
+        "wind": 5,  # Default wind speed in km/h
+        "humidity": 50,  # Default relative humidity in %
+        "dew": 10,  # Default dewpoint in °C
+        "solar": 100,  # Default solar radiation (W/m²)
+        "soil_moisture": 30  # Default soil moisture in percentage
+    }
 
-dfs = [get_weatherbit(), get_open_meteo(), get_visual_crossing()]
-dfs = [df for df in dfs if df is not None]
+    forecasts = []
+    for i in range(len(daily["time"])):
+        date_str = daily["time"][i]
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        weekday_name = date_obj.strftime("%A")  # Get weekday name (e.g., Monday)
 
-if not dfs:
-    st.error("All API calls failed. Please try again later.")
-    st.stop()
+        forecast = {
+            "date": date_str,
+            "weekday": weekday_name,
+            "pop": daily.get("precipitation_probability_mean", [default_value["pop"]])[i],
+            "rain": daily.get("precipitation_sum", [default_value["rain"]])[i],  # Rain amount (mm)
+            "temp": daily.get("temperature_2m_max", [default_value["temp"]])[i],
+            "wind": daily.get("windspeed_10m_max", [default_value["wind"]])[i],
+            "humidity": daily.get("relative_humidity_2m_mean", [default_value["humidity"]])[i],
+            "dew": daily.get("dewpoint_2m_mean", [default_value["dew"]])[i],
+            "solar": daily.get("shortwave_radiation_sum", [default_value["solar"]])[i],
+            "soil_moisture": daily.get("soil_moisture_0_to_1cm_mean", [default_value["soil_moisture"]])[i]
+        }
+        forecasts.append(forecast)
 
-combined_df = pd.concat(dfs)
-combined_df = combined_df.sort_values(["date", "source"])
+    return forecasts
 
-# --------- PLOT GRAPH --------- #
 
-st.subheader("Forecasted Rainfall (Next 7 Days)")
 
-rain_chart_data = combined_df.groupby("date")["precip"].mean().reset_index()
-rain_chart_data = rain_chart_data.set_index("date")
-st.line_chart(rain_chart_data.rename(columns={"precip": "Rainfall (mm)"}))
 
-# --------- SHOW TABLE --------- #
 
-st.subheader("Detailed 7-Day Weather Forecast")
-st.dataframe(combined_df)
+# --- Drying Days Estimator ---
+def estimate_drying_days(forecast):
+    threshold = 3.0
+    total = 0
+    for i, day in enumerate(forecast):
+        temp = day["temp"]
+        wind = day["wind"]
+        humidity = day["humidity"]
+        solar = day["solar"] or 15
+        soil = day["soil_moisture"] or 0.3
+
+        drying_score = (
+            (temp / 40) * 0.3 +
+            (min(wind, 25) / 25) * 0.2 +
+            ((1 - humidity / 100) * 0.2) +
+            ((solar / 30) * 0.2) -
+            ((soil / 0.6) * 0.2)
+        )
+        total += max(0, drying_score)
+        if total >= threshold:
+            return i + 1
+    return None
+
+# --- Average Forecasts ---
+def average_forecasts(*sources):
+    combined = {}
+    for source in sources:
+        for item in source:
+            date = item["date"]
+            if date not in combined:
+                combined[date] = {key: [] for key in item}
+            for key in item:
+                combined[date][key].append(item[key] if item[key] is not None else 0)
+
+    avg_forecast = []
+    for date, values in sorted(combined.items()):
+        entry = {"date": date}
+        for key in values:
+            if key != "date":
+                entry[key] = round(sum(values[key]) / len(values[key]), 2)
+        avg_forecast.append(entry)
+
+    drying_days = estimate_drying_days(avg_forecast)
+    for day in avg_forecast:
+        day["dry_day"] = drying_days if drying_days else "N/A"
+
+    return avg_forecast
+
+# --- UI ---
+st.set_page_config("Rain Forecast", layout="centered")
+st.title("🌾 Lucerne Drying Forecast")
+st.caption("📍 Graaff-Reinet, South Africa")
+
+try:
+    wapi = get_weatherapi()
+    wbit = get_weatherbit()
+    ometeo = get_openmeteo()
+    avg = average_forecasts(wapi, wbit, ometeo)
+
+    # --- Chart ---
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[d["date"] for d in avg],
+        y=[d["pop"] for d in avg],
+        mode="lines+markers",
+        name="Rain % (Avg)",
+        line=dict(color="blue", width=3),
+        hovertemplate="Date: %{x}<br>Rain: %{y}%<extra></extra>"
+    ))
+
+    fig.update_layout(
+        title="Chance of Rain (%)",
+        xaxis_title="Date",
+        yaxis_title="Probability",
+        xaxis_fixedrange=True,
+        yaxis_fixedrange=True,
+        dragmode=False,
+        template="simple_white"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- Forecast Table ---
+    st.subheader("📊 Forecast Details")
+    st.dataframe(
+        {
+            "Date": [d["date"] for d in avg],
+            "Rain %": [d["pop"] for d in avg],
+            "Temp (°C)": [d["temp"] for d in avg],
+            "Wind (km/h)": [d["wind"] for d in avg],
+            "Humidity %": [d["humidity"] for d in avg],
+            "Dew (°C)": [d["dew"] for d in avg],
+            "Solar (MJ/m²)": [d["solar"] for d in avg],
+            "Soil Moisture": [d["soil_moisture"] for d in avg],
+            "Est. Dry Day": [d["dry_day"] for d in avg]
+        },
+        use_container_width=True
+    )
+
+except Exception as e:
+    st.error(f"Error loading data: {e}")
