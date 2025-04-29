@@ -1,3 +1,5 @@
+
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -9,8 +11,8 @@ LAT = 51.5074
 LON = -0.1278
 
 # Add your API keys
-WEATHERBIT_KEY = "your_weatherbit_api_key"
-VISUAL_CROSSING_KEY = "your_visual_crossing_api_key"
+WEATHERBIT_KEY = "f7a96d163c3e4c949cd127bc08fbbb79"
+VISUAL_CROSSING_KEY = "95bd9405d0f24fd38b8125029251004"
 
 def get_weatherbit():
     url = f"https://api.weatherbit.io/v2.0/forecast/daily?lat={LAT}&lon={LON}&key={WEATHERBIT_KEY}&days=10"
