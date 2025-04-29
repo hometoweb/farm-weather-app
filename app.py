@@ -1,136 +1,84 @@
 
 import streamlit as st
-import requests
 import pandas as pd
+import requests
 from datetime import date, timedelta
 
-st.set_page_config(page_title="Weather Dashboard")
+# --------- API FUNCTIONS --------- #
 
-# -- User inputs (API keys, location, dates) --
-weatherbit_key = st.text_input("f7a96d163c3e4c949cd127bc08fbbb79", type="password")
-visualcrossing_key = st.text_input("95bd9405d0f24fd38b8125029251004", type="password")
-lat = st.number_input("Latitude", value=40.7128)   # e.g. New York City
-lon = st.number_input("Longitude", value=-74.0060)
-start_date = st.date_input("Start Date", value=date.today())
-end_date   = st.date_input("End Date", value=date.today() + timedelta(days=3))
-
-# Ensure dates in ISO format strings
-start_str = start_date.isoformat()
-end_str = end_date.isoformat()
-
-data_frames = []
-
-# ---- Fetch from Weatherbit ----
-if weatherbit_key:
+def get_weatherbit():
     try:
-        wb_url = "https://api.weatherbit.io/v2.0/forecast/daily"
-        params = {"lat": lat, "lon": lon, "key": weatherbit_key, "days": (end_date - start_date).days + 1}
-        wb_resp = requests.get(wb_url, params=params)
-        # Handle HTTP errors explicitly
-        if wb_resp.status_code == 429:
-            st.warning("Weatherbit rate limit reached (429 Too Many Requests). Skipping Weatherbit data.")
-        elif wb_resp.status_code != 200:
-            st.warning(f"Weatherbit request failed with status code {wb_resp.status_code}.")
-        else:
-            # Parse JSON safely
-            try:
-                wb_data = wb_resp.json()
-            except ValueError:
-                st.warning("Weatherbit returned invalid JSON. Skipping Weatherbit data.")
-                wb_data = None
-            if wb_data and "data" in wb_data:
-                df_wb = pd.DataFrame(wb_data["data"])
-                # Convert date field and select relevant columns
-                df_wb["date"] = pd.to_datetime(df_wb["datetime"]).dt.date
-                # We use high_temp, low_temp, precip as example fields
-                df_wb = df_wb[["date", "high_temp", "low_temp", "precip"]].copy()
-                df_wb["source"] = "Weatherbit"
-                data_frames.append(df_wb)
-            else:
-                st.warning("Weatherbit JSON missing expected fields. Skipping Weatherbit data.")
-    except requests.exceptions.RequestException as e:
-        st.warning(f"Weatherbit request encountered an error: {e}")
+        api_key = st.secrets["f7a96d163c3e4c949cd127bc08fbbb79"]
+        url = f"https://api.weatherbit.io/v2.0/forecast/daily?lat=51.5074&lon=0.1278&days=7&key={api_key}"
+        res = requests.get(url)
+        data = res.json()
+        forecasts = [{
+            "source": "Weatherbit",
+            "date": pd.to_datetime(day["valid_date"]).date(),
+            "temp": day["temp"],
+            "precip": day["precip"]
+        } for day in data["data"]]
+        return pd.DataFrame(forecasts)
+    except Exception as e:
+        st.warning(f"Weatherbit API skipped: {e}")
+        return None
 
-# ---- Fetch from Open-Meteo ----
-try:
-    om_url = "https://api.open-meteo.com/v1/forecast"
-    om_params = {
-        "latitude": lat,
-        "longitude": lon,
-        # Only valid daily fields; removed any invalid 'soil_moisture'
-        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
-        "start_date": start_str,
-        "end_date": end_str,
-        "timezone": "UTC"
-    }
-    om_resp = requests.get(om_url, params=om_params)
-    if om_resp.status_code != 200:
-        st.warning(f"Open-Meteo request failed with status code {om_resp.status_code}.")
-    else:
-        try:
-            om_data = om_resp.json()
-        except ValueError:
-            st.warning("Open-Meteo returned invalid JSON. Skipping Open-Meteo data.")
-            om_data = None
-        if om_data and "daily" in om_data:
-            daily = om_data["daily"]
-            # Check that expected keys exist
-            if "time" in daily:
-                df_om = pd.DataFrame({
-                    "date": daily["time"],
-                    "high_temp": daily.get("temperature_2m_max"),
-                    "low_temp": daily.get("temperature_2m_min"),
-                    "precip": daily.get("precipitation_sum")
-                })
-                df_om["date"] = pd.to_datetime(df_om["date"]).dt.date
-                df_om["source"] = "Open-Meteo"
-                data_frames.append(df_om)
-            else:
-                st.warning("Open-Meteo JSON missing 'time' field. Skipping Open-Meteo data.")
-        else:
-            st.warning("Open-Meteo JSON missing 'daily' data. Skipping Open-Meteo data.")
-except requests.exceptions.RequestException as e:
-    st.warning(f"Open-Meteo request encountered an error: {e}")
-
-# ---- Fetch from Visual Crossing ----
-if visualcrossing_key:
+def get_open_meteo():
     try:
-        vc_location = f"{lat},{lon}"
-        vc_url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{vc_location}/{start_str}/{end_str}"
-        vc_params = {"unitGroup": "metric", "include": "days", "key": visualcrossing_key}
-        vc_resp = requests.get(vc_url, params=vc_params)
-        if vc_resp.status_code != 200:
-            st.warning(f"Visual Crossing request failed with status code {vc_resp.status_code}.")
-        else:
-            try:
-                vc_data = vc_resp.json()
-            except ValueError:
-                st.warning("Visual Crossing returned invalid JSON. Skipping Visual Crossing data.")
-                vc_data = None
-            if vc_data and "days" in vc_data:
-                df_vc = pd.DataFrame(vc_data["days"])
-                # Rename and select fields: datetime -> date, tempmax, tempmin, precip
-                if "datetime" in df_vc.columns:
-                    df_vc.rename(columns={"datetime": "date", "tempmax": "high_temp", "tempmin": "low_temp", "precip": "precip"}, inplace=True)
-                    df_vc["date"] = pd.to_datetime(df_vc["date"]).dt.date
-                    # Keep only these columns
-                    cols = ["date", "high_temp", "low_temp", "precip"]
-                    df_vc = df_vc[[col for col in cols if col in df_vc.columns]].copy()
-                    df_vc["source"] = "Visual Crossing"
-                    data_frames.append(df_vc)
-                else:
-                    st.warning("Visual Crossing JSON missing 'datetime' field in days. Skipping Visual Crossing data.")
-            else:
-                st.warning("Visual Crossing JSON missing 'days' data. Skipping Visual Crossing data.")
-    except requests.exceptions.RequestException as e:
-        st.warning(f"Visual Crossing request encountered an error: {e}")
+        url = "https://api.open-meteo.com/v1/forecast?latitude=51.5074&longitude=0.1278&daily=temperature_2m_max,precipitation_sum&timezone=Europe%2FLondon"
+        res = requests.get(url)
+        data = res.json()
+        forecasts = [{
+            "source": "Open-Meteo",
+            "date": pd.to_datetime(date_str).date(),
+            "temp": temp,
+            "precip": precip
+        } for date_str, temp, precip in zip(data["daily"]["time"], data["daily"]["temperature_2m_max"], data["daily"]["precipitation_sum"])]
+        return pd.DataFrame(forecasts)
+    except Exception as e:
+        st.warning(f"Open-Meteo API skipped: {e}")
+        return None
 
-# ---- Combine and display results ----
-if data_frames:
-    combined_df = pd.concat(data_frames, ignore_index=True)
-    # Sort by date and then source for consistency
-    combined_df.sort_values(by=["date", "source"], inplace=True)
-    st.dataframe(combined_df)
-else:
-    st.write("No weather data available from any source.")
+def get_visual_crossing():
+    try:
+        api_key = st.secrets["95bd9405d0f24fd38b8125029251004"]
+        url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/London/next7days?unitGroup=metric&key={api_key}&include=days"
+        res = requests.get(url)
+        data = res.json()
+        forecasts = [{
+            "source": "Visual Crossing",
+            "date": pd.to_datetime(day["datetime"]).date(),
+            "temp": day["temp"],
+            "precip": day["precip"]
+        } for day in data["days"]]
+        return pd.DataFrame(forecasts)
+    except Exception as e:
+        st.warning(f"Visual Crossing API skipped: {e}")
+        return None
 
+# --------- MAIN APP --------- #
+
+st.title("Farm Weather Forecast (7-Day View)")
+
+dfs = [get_weatherbit(), get_open_meteo(), get_visual_crossing()]
+dfs = [df for df in dfs if df is not None]
+
+if not dfs:
+    st.error("All API calls failed. Please try again later.")
+    st.stop()
+
+combined_df = pd.concat(dfs)
+combined_df = combined_df.sort_values(["date", "source"])
+
+# --------- PLOT GRAPH --------- #
+
+st.subheader("Forecasted Rainfall (Next 7 Days)")
+
+rain_chart_data = combined_df.groupby("date")["precip"].mean().reset_index()
+rain_chart_data = rain_chart_data.set_index("date")
+st.line_chart(rain_chart_data.rename(columns={"precip": "Rainfall (mm)"}))
+
+# --------- SHOW TABLE --------- #
+
+st.subheader("Detailed 7-Day Weather Forecast")
+st.dataframe(combined_df)
